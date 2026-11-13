@@ -7,7 +7,6 @@ import requests
 import os
 import threading
 import time
-from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from openai import OpenAI
 from flask import Flask
@@ -39,23 +38,13 @@ def run_flask():
 # --- БАЗА ДАННЫХ ---
 conn = sqlite3.connect('skuf_bot.db', check_same_thread=False)
 cursor = conn.cursor()
-# Таблица юзеров
-cursor.execute('''CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY, 
-    hash_id TEXT UNIQUE,
-    sub_end REAL DEFAULT 0
-)''')
-# Таблица промокодов
-cursor.execute('''CREATE TABLE IF NOT EXISTS promos (
-    code TEXT UNIQUE, 
-    days INTEGER,
-    used_by INTEGER DEFAULT 0
-)''')
+cursor.execute('''CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, hash_id TEXT UNIQUE, sub_end REAL DEFAULT 0)''')
+cursor.execute('''CREATE TABLE IF NOT EXISTS promos (code TEXT UNIQUE, days INTEGER, used_by INTEGER DEFAULT 0)''')
 conn.commit()
 
 # --- ПАМЯТЬ ---
 user_sessions = {}
-admin_state = {} # Для ввода данных в админке
+admin_state = {}
 
 # --- ПРОМПТЫ ---
 BASE_PROMPT = """Ты — SKUF AI, созданный компанией Luna. Отвечай четко, дерзко, без воды."""
@@ -71,14 +60,11 @@ MODES = {
 def get_user_data(user_id):
     cursor.execute("SELECT hash_id, sub_end FROM users WHERE id=?", (user_id,))
     res = cursor.fetchone()
-    if res:
-        return {"hash": res[0], "sub_end": res[1]}
-    return None
+    return {"hash": res[0], "sub_end": res[1]} if res else None
 
 def create_user(user_id):
     new_hash = f"#{random.randint(1000, 9999)}"
-    # Даем 12 часов (43200 секунд)
-    sub_end = time.time() + 43200
+    sub_end = time.time() + 43200 # 12 часов
     cursor.execute("INSERT OR IGNORE INTO users (id, hash_id, sub_end) VALUES (?, ?, ?)", (user_id, new_hash, sub_end))
     conn.commit()
     return new_hash
@@ -94,7 +80,8 @@ def check_sub(user_id):
 
 def get_image_url(query):
     try:
-        url = f"https://www.bing.com/images/search?q={query}&safeSearch=Off&form=HDRSC2&first=1"
+        # Убрал safeSearch=Off, теперь только безопасный поиск
+        url = f"https://www.bing.com/images/search?q={query}&first=1" 
         headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(url, headers=headers)
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -104,9 +91,10 @@ def get_image_url(query):
 
 # --- МЕНЮ ---
 def get_main_menu(user_id):
-    markup = []
-    markup.append([InlineKeyboardButton("🚀 Новый чат", callback_data="new_chat"), InlineKeyboardButton("▶️ Продолжить чат", callback_data="continue_chat")])
-    markup.append([InlineKeyboardButton("⚙️ Настройки", callback_data="settings")])
+    markup = [
+        [InlineKeyboardButton("🚀 Новый чат", callback_data="new_chat"), InlineKeyboardButton("▶️ Продолжить чат", callback_data="continue_chat")],
+        [InlineKeyboardButton("⚙️ Настройки", callback_data="settings")]
+    ]
     if user_id == ADMIN_ID:
         markup.append([InlineKeyboardButton("👑 Админка", callback_data="admin_panel")])
     return InlineKeyboardMarkup(markup)
@@ -120,40 +108,31 @@ def get_admin_menu():
     ]
     return InlineKeyboardMarkup(markup)
 
-# --- СТАРТ ---
+# --- ОБРАБОТЧИКИ ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not get_user_data(user_id):
         create_user(user_id)
     
     is_active, sub_info = check_sub(user_id)
-    
     text = f"👋 **Привет! Я SKUF AI.**\n\n"
-    if is_active:
-        text += f"✅ Подписка активна: **{sub_info}**\n"
-    else:
-        text += f"❌ Подписка истекла.\nВведи /promocode <код> для активации.\n"
+    text += f"✅ Подписка: **{sub_info}**\n" if is_active else f"❌ Подписка истекла. Введи /promocode.\n"
     
     await update.message.reply_text(text, reply_markup=get_main_menu(user_id), parse_mode='Markdown')
 
-# --- ПРОМОКОДЫ ---
 async def promocode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     args = context.args
-    if not args:
-        return await update.message.reply_text("Использование: `/promocode <код>`", parse_mode='Markdown')
+    if not args: return await update.message.reply_text("Использование: `/promocode <код>`", parse_mode='Markdown')
     
     code = args[0]
     cursor.execute("SELECT days, used_by FROM promos WHERE code=?", (code,))
     res = cursor.fetchone()
     
-    if not res:
-        return await update.message.reply_text("❌ Неверный промокод.")
-    if res[1] != 0:
-        return await update.message.reply_text("❌ Этот промокод уже использован.")
+    if not res: return await update.message.reply_text("❌ Неверный промокод.")
+    if res[1] != 0: return await update.message.reply_text("❌ Этот промокод уже использован.")
     
     days = res[0]
-    # Начисляем дни
     cursor.execute("UPDATE promos SET used_by=? WHERE code=?", (user_id, code))
     
     data = get_user_data(user_id)
@@ -163,7 +142,15 @@ async def promocode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(f"✅ Промокод активирован! Подписка продлена на {days} дней.")
 
-# --- АДМИНКА ---
+async def pic(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.message.text.replace('/pic', '').strip()
+    if not query: return await update.message.reply_text("Напиши, что искать.")
+    await update.message.chat.send_action(action="upload_photo")
+    img_url = get_image_url(query)
+    if img_url: await update.message.reply_photo(img_url, caption=f"🔍 Найдено: {query}")
+    else: await update.message.reply_text("❌ Не удалось найти.")
+
+# --- ОСТАЛЬНОЙ КОД (АДМИНКА И ЧАТ) ---
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -175,81 +162,57 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     if query.from_user.id != ADMIN_ID: return
     cursor.execute("SELECT COUNT(*) FROM users")
-    total = cursor.fetchone()[0]
-    await query.edit_message_text(f"📊 **Статистика:**\nВсего юзеров: {total}", reply_markup=get_admin_menu(), parse_mode='Markdown')
+    await query.edit_message_text(f"📊 **Статистика:**\nВсего юзеров: {cursor.fetchone()[0]}", reply_markup=get_admin_menu(), parse_mode='Markdown')
 
 async def admin_create_promo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if query.from_user.id != ADMIN_ID: return
     admin_state[ADMIN_ID] = "waiting_promo"
-    await query.edit_message_text("Введи промокод и через пробел количество дней (например: `SALE 30`).\nДля отмены напиши /cancel.")
+    await query.edit_message_text("Введи промокод и дни (например: `SALE 30`).")
 
-# --- ОБРАБОТЧИК ВВОДА В АДМИНКЕ ---
 async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID or ADMIN_ID not in admin_state: return
-    
-    state = admin_state[ADMIN_ID]
-    if state == "waiting_promo":
+    if admin_state[ADMIN_ID] == "waiting_promo":
         try:
             parts = update.message.text.split()
-            code = parts[0]
-            days = int(parts[1])
-            cursor.execute("INSERT INTO promos (code, days) VALUES (?, ?)", (code, days))
+            cursor.execute("INSERT INTO promos (code, days) VALUES (?, ?)", (parts[0], int(parts[1])))
             conn.commit()
             del admin_state[ADMIN_ID]
-            await update.message.reply_text(f"✅ Промокод `{code}` создан на {days} дней.", reply_markup=get_admin_menu(), parse_mode='Markdown')
-        except:
-            await update.message.reply_text("❌ Ошибка. Введи `КОД ДНИ` (например, `SALE 30`).")
+            await update.message.reply_text(f"✅ Промокод `{parts[0]}` создан.", reply_markup=get_admin_menu(), parse_mode='Markdown')
+        except: await update.message.reply_text("❌ Ошибка формата.")
 
-# --- ОСТАЛЬНЫЕ ФУНКЦИИ (МЕНЮ, ЧАТ, НАСТРОЙКИ) ---
 async def new_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user_id = query.from_user.id
-    user_sessions[user_id] = {"history": [{"role": "system", "content": BASE_PROMPT}], "mode": "default"}
-    await query.edit_message_text(f"💬 Новый чат создан.\nПиши сообщение.", parse_mode='Markdown')
+    user_sessions[query.from_user.id] = {"history": [{"role": "system", "content": BASE_PROMPT}], "mode": "default"}
+    await query.edit_message_text(f"💬 Новый чат создан. Пиши сообщение.")
 
 async def continue_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user_id = query.from_user.id
-    if user_id not in user_sessions or len(user_sessions[user_id]["history"]) <= 1:
-        return await query.answer("У тебя нет сохраненных чатов.", show_alert=True)
-    await query.edit_message_text(f"▶️ Продолжаем чат.\nПиши сообщение.", parse_mode='Markdown')
+    if query.from_user.id not in user_sessions: return await query.answer("Нет чатов.", show_alert=True)
+    await query.edit_message_text(f"▶️ Продолжаем чат. Пиши сообщение.")
 
 async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    text = "⚙️ **Настройки**\n\nРежимы: `/default`, `/acro`, `/psixolog`, `/coder`, `/agent troll`"
-    await query.edit_message_text(text, reply_markup=get_main_menu(query.from_user.id), parse_mode='Markdown')
+    await query.edit_message_text("⚙️ **Настройки**\n\nРежимы: `/default`, `/acro`, `/psixolog`, `/coder`, `/agent troll`", reply_markup=get_main_menu(query.from_user.id), parse_mode='Markdown')
 
 async def change_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     cmd = update.message.text[1:].split()
-    
     if cmd[0] == "agent":
         if len(cmd) > 1 and cmd[1] == "troll":
-            if user_id not in user_sessions:
-                user_sessions[user_id] = {"history": [], "mode": "default"}
+            if user_id not in user_sessions: user_sessions[user_id] = {"history": [], "mode": "default"}
             user_sessions[user_id]["mode"] = "agent_troll"
             await update.message.reply_text("🤖 **Режим Секретаря-Тролля активирован.**")
         return
-
     if cmd[0] in MODES:
-        if user_id not in user_sessions:
-            user_sessions[user_id] = {"history": [{"role": "system", "content": BASE_PROMPT}], "mode": "default"}
+        if user_id not in user_sessions: user_sessions[user_id] = {"history": [{"role": "system", "content": BASE_PROMPT}], "mode": "default"}
         user_sessions[user_id]["mode"] = cmd[0]
         user_sessions[user_id]["history"] = [{"role": "system", "content": BASE_PROMPT + "\n\n" + MODES[cmd[0]]}]
         await update.message.reply_text(f"✅ Режим изменен на: **{cmd[0]}**")
-
-async def pic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.message.text.replace('/pic', '').strip()
-    if not query: return await update.message.reply_text("Напиши, что искать.")
-    await update.message.chat.send_action(action="upload_photo")
-    img_url = get_image_url(query)
-    if img_url: await update.message.reply_photo(img_url, caption=f"🔍 Найдено: {query}")
-    else: await update.message.reply_text("❌ Не удалось найти.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -258,9 +221,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if update.effective_chat.type == 'private' and user_id in user_sessions:
         is_active, _ = check_sub(user_id)
-        if not is_active and user_id != ADMIN_ID:
-            return await update.message.reply_text("❌ Твоя подписка истекла. Введи /promocode <код>.")
-
+        if not is_active and user_id != ADMIN_ID: return await update.message.reply_text("❌ Подписка истекла. Введи /promocode.")
         if user_sessions[user_id]["mode"] == "agent_troll": return
             
         await update.message.chat.send_action(action="typing")
@@ -272,48 +233,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             history.append({"role": "assistant", "content": bot_reply})
             if len(history) > 21: user_sessions[user_id]["history"] = [history[0]] + history[-20:]
             await update.message.reply_text(bot_reply)
-        except Exception as e:
-            await update.message.reply_text(f"❌ Ошибка: {e}")
+        except Exception as e: await update.message.reply_text(f"❌ Ошибка: {e}")
 
-# --- БИЗНЕС-СООБЩЕНИЯ (СЕКРЕТАРЬ) ---
 async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.business_message
     if not message or not message.text: return
-    
-    text = message.text
-    chat_id = message.chat.id
-    
     if ADMIN_ID in user_sessions and user_sessions[ADMIN_ID]["mode"] == "agent_troll":
-        prompt = f"Ты — агрессивный секретарь. Тебе написали: '{text}'. Ответь жестко, высмей собеседника, защити хозяина."
+        prompt = f"Ты — агрессивный секретарь. Тебе написали: '{message.text}'. Ответь жестко."
         try:
-            response = client.chat.completions.create(
-                model=MODEL_NAME, 
-                messages=[{"role": "system", "content": MODES["agent_troll"]}, {"role": "user", "content": prompt}], 
-                temperature=0.8
-            )
-            bot_reply = response.choices[0].message.content
-            await context.bot.send_message(chat_id=chat_id, text=bot_reply)
-        except Exception as e:
-            logging.error(f"Ошибка в бизнес-чате: {e}")
+            response = client.chat.completions.create(model=MODEL_NAME, messages=[{"role": "system", "content": MODES["agent_troll"]}, {"role": "user", "content": prompt}], temperature=0.8)
+            await context.bot.send_message(chat_id=message.chat.id, text=response.choices[0].message.content)
+        except: pass
 
 # --- ЗАПУСК ---
 def main():
-    # Создаем админский промокод при запуске, если его нет
     cursor.execute("INSERT OR IGNORE INTO promos (code, days, used_by) VALUES (?, ?, ?)", ("newchatgptskufai", 36656, 0))
     conn.commit()
-
     threading.Thread(target=run_flask, daemon=True).start()
     
     app_bot = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app_bot.add_handler(CommandHandler("start", start))
     app_bot.add_handler(CommandHandler("promocode", promocode))
+    app_bot.add_handler(CommandHandler("pic", pic))
     app_bot.add_handler(CommandHandler("coder", change_mode))
     app_bot.add_handler(CommandHandler("psixolog", change_mode))
     app_bot.add_handler(CommandHandler("acro", change_mode))
     app_bot.add_handler(CommandHandler("default", change_mode))
     app_bot.add_handler(CommandHandler("agent", change_mode))
-    app_bot.add_handler(CommandHandler("pic", pic))
     
     app_bot.add_handler(CallbackQueryHandler(new_chat, pattern="new_chat"))
     app_bot.add_handler(CallbackQueryHandler(continue_chat, pattern="continue_chat"))
@@ -323,11 +270,11 @@ def main():
     app_bot.add_handler(CallbackQueryHandler(admin_create_promo, pattern="admin_create_promo"))
     
     app_bot.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, handle_message))
-    app_bot.add_handler(MessageHandler(filters.TEXT & filters.User(ADMIN_ID), handle_admin_input, block=False)) # Ввод данных в админке
+    app_bot.add_handler(MessageHandler(filters.TEXT & filters.User(ADMIN_ID), handle_admin_input, block=False))
     app_bot.add_handler(MessageHandler(filters.UpdateType.BUSINESS_MESSAGE, handle_business_message))
 
     print("=" * 50)
-    print("SKUF AI Бот запущен (Промокоды + Админка).")
+    print("SKUF AI Бот запущен (Безопасный поиск).")
     print("=" * 50)
     app_bot.run_polling(allowed_updates=Update.ALL_TYPES)
 
