@@ -42,7 +42,7 @@ cursor.execute('''CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, hash
 conn.commit()
 
 # --- ПАМЯТЬ ---
-user_sessions = {}
+user_sessions = {} # Хранит режимы и историю
 agent_mode_chats = set()
 
 # --- ПРОМПТЫ ---
@@ -52,7 +52,7 @@ MODES = {
     "coder": "Ты в режиме кодера. Пиши только код.",
     "psixolog": "Ты в режиме психолога.",
     "acro": "Ты в образе 'Гопник из 90-х'. Используй мат для связки слов.",
-    "agent_troll": "Ты — секретарь-тролль. Отвечай агрессией на агрессию."
+    "agent_troll": "Ты — агрессивный секретарь. Твоя задача — защищать хозяина. Если ему пишут гадости, ты должен ответить жестко, высмеять собеседника, но не переходить на личности. Будь дерзким и злым."
 }
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
@@ -97,7 +97,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Твой уникальный ID: **{user_hash}**
 Я работаю в личных сообщениях, а также умею быть секретарем (если ты подключил меня в настройках) и агентом-троллем в группах.
 
-🧠 **Режимы:** `/default`, `/acro`, `/psixolog`, `/coder`, `/agent troll`
+🧠 **Режимы:**
+`/default` — стандартный
+`/acro` — агрессивный (гопник)
+`/psixolog` — психолог
+`/coder` — кодер
+`/agent troll` — секретарь-тролль (для ЛС и групп)
+
+👉 **Выбери действие:**
     """
     await update.message.reply_text(welcome_text, reply_markup=get_main_menu(), parse_mode='Markdown')
 
@@ -120,18 +127,17 @@ async def change_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if cmd[0] == "agent":
         if len(cmd) > 1 and cmd[1] == "troll":
-            if update.effective_chat.type in ['group', 'supergroup']:
-                agent_mode_chats.add(update.effective_chat.id)
-                await update.message.reply_text("🤖 **Режим Агента-Тролля активирован.**\nБуду следить за чатом.")
-            else:
-                await update.message.reply_text("❌ Только для групп.")
+            if user_id not in user_sessions:
+                user_sessions[user_id] = {"history": [], "mode": "default"}
+            user_sessions[user_id]["mode"] = "agent_troll"
+            await update.message.reply_text("🤖 **Режим Секретаря-Тролля активирован.**\nЯ буду следить за твоими чатами и отвечать агрессией на агрессию (если подключен как секретарь).")
         return
 
     if cmd[0] in MODES:
         if user_id not in user_sessions:
             user_sessions[user_id] = {"history": [{"role": "system", "content": BASE_PROMPT}], "mode": "default"}
         user_sessions[user_id]["mode"] = cmd[0]
-        user_sessions[user_id]["history"][0] = {"role": "system", "content": BASE_PROMPT + "\n\n" + MODES[cmd[0]]}
+        user_sessions[user_id]["history"] = [{"role": "system", "content": BASE_PROMPT + "\n\n" + MODES[cmd[0]]}]
         await update.message.reply_text(f"✅ Режим изменен на: **{cmd[0]}**")
 
 async def pic(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -149,11 +155,14 @@ async def pic(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text
-    
     if not text: return
 
-    # Если это ЛС и у юзера есть сессия
+    # Если это ЛС и у юзера есть сессия (обычный чат)
     if update.effective_chat.type == 'private' and user_id in user_sessions:
+        # Если включен тролль, в ЛС он не должен отвечать на свои же сообщения, только на бизнес
+        if user_sessions[user_id]["mode"] == "agent_troll":
+            return
+            
         await update.message.chat.send_action(action="typing")
         try:
             history = user_sessions[user_id]["history"]
@@ -166,25 +175,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await update.message.reply_text(f"❌ Ошибка: {e}")
 
-# --- ОБРАБОТЧИК БИЗНЕС-СООБЩЕНИЙ (СЕКРЕТАРЬ) ---
+# --- ОБРАБОТЧИК БИЗНЕС-СООБЩЕНИЙ (СЕКРЕТАРЬ-ТРОЛЛЬ) ---
 async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Эта функция срабатывает, когда бот подключен как секретарь
     message = update.business_message
     if not message or not message.text: return
     
     text = message.text
     chat_id = message.chat.id
     
-    # Тут можно добавить логику, например, чтобы бот отвечал на определенные слова
-    # Пока просто пишем в лог
-    logging.info(f"[BUSINESS] Сообщение в чате {chat_id}: {text}")
-    
-    # Пример: если в сообщении есть "привет", отвечаем от имени бота
-    if "привет" in text.lower():
-        await context.bot.send_message(chat_id=chat_id, text="Привет! Я секретарь SKUF AI. Чем помочь?")
+    # Проверяем, включен ли у тебя (Админа) режим тролля
+    if ADMIN_ID in user_sessions and user_sessions[ADMIN_ID]["mode"] == "agent_troll":
+        logging.info(f"[BUSINESS TROLL] Сообщение: {text}")
+        
+        prompt = f"Ты — агрессивный секретарь. Тебе написали: '{text}'. Ответь жестко, высмей собеседника, защити хозяина. Не переходи на личности."
+        
+        try:
+            response = client.chat.completions.create(
+                model=MODEL_NAME, 
+                messages=[{"role": "system", "content": MODES["agent_troll"]}, {"role": "user", "content": prompt}], 
+                temperature=0.8
+            )
+            bot_reply = response.choices[0].message.content
+            
+            # Отправляем ответ в чат
+            await context.bot.send_message(chat_id=chat_id, text=bot_reply)
+        except Exception as e:
+            logging.error(f"Ошибка в бизнес-чате: {e}")
 
 # --- АГЕНТ ТРОЛЛИНГА (ГРУППЫ) ---
-async def agent_troll(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def agent_troll_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if message.chat.id in agent_mode_chats and message.text and not message.text.startswith('/'):
         aggressive_words = ["хуй", "бля", "ебан", "пидор", "лох", "тупой", "идиот", "дурак"]
@@ -220,14 +239,14 @@ def main():
     app_bot.add_handler(CallbackQueryHandler(new_chat, pattern="new_chat"))
     app_bot.add_handler(CallbackQueryHandler(settings, pattern="settings"))
     
-    # Обработчик ЛС
+    # Обработчик ЛС (обычный чат)
     app_bot.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, handle_message))
     
     # Обработчик Бизнес-сообщений (Секретарь)
     app_bot.add_handler(MessageHandler(filters.UpdateType.BUSINESS_MESSAGE, handle_business_message))
     
     # Обработчик групп (Агент)
-    app_bot.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS, agent_troll))
+    app_bot.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS, agent_troll_group))
 
     print("=" * 50)
     print("SKUF AI Бот запущен (Секретарь + Агент).")
