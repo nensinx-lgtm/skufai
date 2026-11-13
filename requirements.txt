@@ -1,4 +1,5 @@
 pyTelegramBotAPI
-gigachat
-flask
+openai
 requests
+beautifulsoup4
+flask
