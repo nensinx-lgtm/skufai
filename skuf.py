@@ -1,1 +1,355 @@
+# language: Python, file: FallBack/skuf.py
+import logging
+import sqlite3
+import random
+import json
+import requests
+import time
+import re
+import ssl
+import os
+import threading
+from datetime import datetime, timedelta
+from bs4 import BeautifulSoup
+from openai import OpenAI
+from gigachat import GigaChat
+from gigachat.models import Chat, Messages, MessagesRole
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+from flask import Flask
 
+# --- SSL ---
+ssl._create_default_https_context = ssl._create_unverified_context
+os.environ['PYTHONHTTPSVERIFY'] = '0'
+os.environ['CURL_CA_BUNDLE'] = ''
+
+# --- НАСТРОЙКИ ---
+TELEGRAM_TOKEN = "9246046750:AAEHxks0Fgu4BKO27R_Rdi5wF-LFvxdygUE" 
+GIGA_AUTH_KEY = "MDFhMWQxYWYtOTg1NC03Y2E5LTg2YjQtOTc1ZTM0YzRmNTQxOjg3M2ZiN2E4LTY4MjUtNDNiZC1iZmVmLWMwMzI0ZDBiN2E2Ng=="
+ZAI_API_KEY = "db05e8f6f2444ee3b605624db998708c.uQ6HPlI60NpBZBT8" 
+ADMIN_ID = 7126354372
+ADMIN_USERNAME = "m0_nk1"
+
+# --- КЛИЕНТЫ ---
+giga = GigaChat(credentials=GIGA_AUTH_KEY, scope="GIGACHAT_API_PERS", model="GigaChat-2-Max", verify_ssl_certs=False, timeout=30)
+client_zai = OpenAI(api_key=ZAI_API_KEY, base_url="https://api.z.ai/api/paas/v4/")
+MODEL_ZAI = "glm-4.5"
+
+# --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
+app = Flask(__name__)
+@app.route('/')
+def health_check():
+    return "SKUF AI is running!", 200
+
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
+
+def keep_alive():
+    while True:
+        time.sleep(600)
+        try:
+            url = os.getenv("RENDER_EXTERNAL_URL", "https://skufai.onrender.com")
+            requests.get(url, timeout=10)
+        except: pass
+
+# --- БАЗА ---
+conn = sqlite3.connect('skuf.db', check_same_thread=False)
+cursor = conn.cursor()
+cursor.execute('''CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY, 
+    username TEXT,
+    sub_end REAL DEFAULT 0,
+    msg_limit INTEGER DEFAULT 50,
+    req_limit INTEGER DEFAULT 10,
+    ref_by INTEGER DEFAULT 0,
+    ref_count INTEGER DEFAULT 0,
+    registered REAL,
+    last_active REAL,
+    style TEXT DEFAULT 'default'
+)''')
+cursor.execute('''CREATE TABLE IF NOT EXISTS bans (id INTEGER PRIMARY KEY)''')
+conn.commit()
+
+# --- ПАМЯТЬ ---
+user_sessions = {}
+user_locks = {}
+user_bans = {}
+
+STYLES = {
+    "default": "Ты — SKUF AI. Отвечай четко, по делу.",
+    "aggressive": "Ты — SKUF AI в агрессивном режиме. Отвечай дерзко, с матом.",
+    "coder": "Ты — SKUF AI в режиме кодера. Пиши только код.",
+    "fast": "Ты — SKUF AI в быстром режиме. Отвечай очень коротко."
+}
+
+# --- ФУНКЦИИ ---
+def get_user(user_id):
+    cursor.execute("SELECT id, username, sub_end, msg_limit, req_limit, ref_by, ref_count, registered, last_active, style FROM users WHERE id=?", (user_id,))
+    res = cursor.fetchone()
+    if not res: return None
+    return dict(zip(["id", "username", "sub_end", "msg_limit", "req_limit", "ref_by", "ref_count", "registered", "last_active", "style"], res))
+
+def create_user(user_id, username, ref_by=0):
+    now = time.time()
+    cursor.execute("INSERT OR IGNORE INTO users (id, username, registered, last_active, ref_by) VALUES (?, ?, ?, ?, ?)", (user_id, username, now, now, ref_by))
+    conn.commit()
+    if ref_by:
+        cursor.execute("UPDATE users SET ref_count = ref_count + 1, msg_limit = msg_limit + 15, req_limit = req_limit + 5 WHERE id=?", (ref_by,))
+        conn.commit()
+
+def update_activity(user_id):
+    cursor.execute("UPDATE users SET last_active=? WHERE id=?", (time.time(), user_id))
+    conn.commit()
+
+def get_image_url(query):
+    try:
+        url = "https://www.bing.com/images/search"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, params={"q": query, "first": 1}, headers=headers, timeout=10, verify=False)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        img_tags = soup.find_all('a', class_='iusc')
+        urls = []
+        for img in img_tags:
+            m_attr = img.get('m')
+            if m_attr:
+                try:
+                    data = json.loads(m_attr)
+                    if 'murl' in data: urls.append(data['murl'])
+                except: pass
+        return random.choice(urls[:5]) if urls else None
+    except: return None
+
+# --- МЕНЮ ---
+def get_main_menu(user_id):
+    markup = [
+        [InlineKeyboardButton("💬 Открыть чат", callback_data="open_chat"), InlineKeyboardButton("👥 Приглашения", callback_data="invites")],
+        [InlineKeyboardButton("⚙️ Настройки", callback_data="settings"), InlineKeyboardButton("📞 Поддержка", url=f"https://t.me/{ADMIN_USERNAME}")]
+    ]
+    return InlineKeyboardMarkup(markup)
+
+def get_chat_menu():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Начать новый чат", callback_data="new_chat"), InlineKeyboardButton("👥 Пригласить друга", callback_data="invites")]])
+
+# --- ОБРАБОТЧИКИ ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    username = update.effective_user.first_name
+    args = context.args
+    ref_by = 0
+    if args and args[0].startswith("ref_"):
+        try: ref_by = int(args[0].replace("ref_", ""))
+        except: pass
+
+    if not get_user(user_id): create_user(user_id, username, ref_by)
+    else: update_activity(user_id)
+        
+    text = f"👋 **Добро пожаловать в SKUF AI, {username}!**\n\n💡 **Что умею:** Писать коды и искать картинки.\n🖼 `/pic [описание]` — найду картинку.\n⚡ **Лимиты:** 10 запросов в сутки (в чате — 50 сообщений).\n🎁 **Приглашения:** +5 запросов за друга.\n🔗 **Партнерка:** 49.9% с каждого платежа.\n\n👉 **Выбери действие:**"
+    await update.message.reply_text(text, reply_markup=get_main_menu(user_id), parse_mode='Markdown')
+
+async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.message.delete()
+    await query.message.chat.send_message("👋 **Главное меню:**", reply_markup=get_main_menu(query.from_user.id), parse_mode='Markdown')
+
+async def open_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    user = get_user(user_id)
+    
+    if user_id in user_bans or cursor.execute("SELECT 1 FROM bans WHERE id=?", (user_id,)).fetchone():
+        return await query.answer("⏳ Вы забанены.", show_alert=True)
+    
+    if user['msg_limit'] <= 0:
+        text = "🚫 **Достигнут предел чата.**\nТы отправил уже 50 сообщений. Начни новый чат или пригласи друга (+15 сообщений)."
+        return await query.edit_message_text(text, reply_markup=get_chat_menu(), parse_mode='Markdown')
+    
+    if user_id not in user_sessions:
+        user_sessions[user_id] = [{"role": "system", "content": STYLES.get(user.get("style", "default"), STYLES["default"])}]
+    
+    await query.edit_message_text(f"💬 Чат открыт. Осталось сообщений: {user['msg_limit']}.")
+
+async def new_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    user = get_user(user_id)
+    if user['msg_limit'] <= 0:
+        return await query.answer("🚫 Лимит исчерпан. Пригласи друга.", show_alert=True)
+    user_sessions[user_id] = [{"role": "system", "content": STYLES.get(user.get("style", "default"), STYLES["default"])}]
+    await query.edit_message_text(f"💬 Новый чат создан. Осталось: {user['msg_limit']}.")
+
+async def invites(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    link = f"https://t.me/{(await context.bot.get_me()).username}?start=ref_{user_id}"
+    text = f"🔗 **Твоя ссылка:**\n`{link}`\n\n🎁 +15 сообщений и +5 запросов за друга.\n💰 49.9% с платежей."
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📋 Скопировать", callback_data="copy_link")], [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")]]), parse_mode='Markdown')
+
+async def copy_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer("Ссылка скопирована!", show_alert=True)
+
+async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    text = "⚙️ **Настройки Skuf AI**\n\nНастрой бота под себя."
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎭 Стиль", callback_data="style_menu"), InlineKeyboardButton("📊 Статистика", callback_data="my_stats")],
+        [InlineKeyboardButton("🎁 Рефералы", callback_data="my_refs"), InlineKeyboardButton("❓ Помощь", callback_data="help")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")]
+    ])
+    await query.edit_message_text(text, reply_markup=markup, parse_mode='Markdown')
+
+async def style_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("😐 Обычный", callback_data="set_style_default"), InlineKeyboardButton("😈 Агрессивный", callback_data="set_style_aggressive")],
+        [InlineKeyboardButton("💻 Кодер", callback_data="set_style_coder"), InlineKeyboardButton("⚡ Быстрый", callback_data="set_style_fast")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="settings")]
+    ])
+    await query.edit_message_text("🎭 **Выбери стиль:**", reply_markup=markup, parse_mode='Markdown')
+
+async def set_style(update: Update, context: ContextTypes.DEFAULT_TYPE, style: str):
+    query = update.callback_query
+    cursor.execute("UPDATE users SET style=? WHERE id=?", (style, query.from_user.id))
+    conn.commit()
+    if query.from_user.id in user_sessions:
+        user_sessions[query.from_user.id] = [{"role": "system", "content": STYLES[style]}]
+    await query.answer(f"Стиль: {style}")
+    await settings(update, context)
+
+async def my_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = get_user(query.from_user.id)
+    text = f"📊 **Статистика:**\n\n💬 Сообщений: {user['msg_limit']} / 50\n🎁 Друзей: {user['ref_count']}\n⚡ Лимит: {user['msg_limit']}"
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings")]]), parse_mode='Markdown')
+
+async def my_refs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = get_user(query.from_user.id)
+    link = f"https://t.me/{(await context.bot.get_me()).username}?start=ref_{query.from_user.id}"
+    text = f"🎁 **Рефералы:**\n`{link}`\n\nПриглашено: {user['ref_count']} (+{user['ref_count']*15} сообщений)."
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📋 Скопировать", callback_data="copy_link")], [InlineKeyboardButton("⬅️ Назад", callback_data="settings")]]), parse_mode='Markdown')
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    text = f"❓ **Помощь:**\n\n• Пиши вопрос — отвечу.\n• `/pic` — найду картинку.\n• `/new` — новый чат.\n• `/balance` — остаток.\n\nАдмин: @{ADMIN_USERNAME}"
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💬 Админ", url=f"https://t.me/{ADMIN_USERNAME}")], [InlineKeyboardButton("⬅️ Назад", callback_data="settings")]]), parse_mode='Markdown')
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text: return
+    user_id = update.effective_user.id
+    text = update.message.text
+
+    user = get_user(user_id)
+    if not user: return
+    if cursor.execute("SELECT 1 FROM bans WHERE id=?", (user_id,)).fetchone():
+        return await update.message.reply_text("⏳ Вы забанены.")
+
+    if user['msg_limit'] <= 0:
+        text_err = "🚫 **Достигнут предел.** Начни новый чат или пригласи друга."
+        return await update.message.reply_text(text_err, reply_markup=get_chat_menu(), parse_mode='Markdown')
+
+    if user_id not in user_sessions:
+        user_sessions[user_id] = [{"role": "system", "content": STYLES.get(user.get("style", "default"), STYLES["default"])}]
+
+    if user_locks.get(user_id, False):
+        return await update.message.reply_text("⚠️ Подожди.")
+    
+    user_locks[user_id] = True
+    update_activity(user_id)
+    
+    try:
+        await update.message.chat.send_action(action="typing")
+        history = user_sessions[user_id]
+        history.append({"role": "user", "content": text})
+
+        msg = await update.message.reply_text("⏳ Думаю...")
+        bot_reply = None
+
+        try:
+            giga_history = []
+            for h in history:
+                role = MessagesRole.USER if h["role"] == "user" else MessagesRole.ASSISTANT
+                if h["role"] == "system": role = MessagesRole.SYSTEM
+                giga_history.append(Messages(role=role, content=h["content"]))
+            
+            giga_response = giga.chat(Chat(messages=giga_history))
+            bot_reply = giga_response.choices[0].message.content
+        except Exception as e:
+            print(f"[LOG] GigaChat упал: {e}")
+            try:
+                response = client_zai.chat.completions.create(model=MODEL_ZAI, messages=history, temperature=0.7, timeout=20)
+                bot_reply = response.choices[0].message.content
+            except Exception as zai_e:
+                print(f"[LOG] Z.ai упал: {zai_e}")
+                bot_reply = f"❌ Ошибка: все сервера упали."
+
+        await msg.delete()
+
+        if bot_reply:
+            bot_reply = re.sub(r'<think>.*?</think>', '', bot_reply, flags=re.DOTALL).strip()
+            history.append({"role": "assistant", "content": bot_reply})
+            if len(history) > 21: user_sessions[user_id] = [history[0]] + history[-20:]
+            cursor.execute("UPDATE users SET msg_limit = msg_limit - 1 WHERE id=?", (user_id,))
+            conn.commit()
+            await update.message.reply_text(bot_reply)
+
+    except Exception as e:
+        print(f"Ошибка: {e}")
+    finally:
+        user_locks[user_id] = False
+
+async def pic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.message.text.replace('/pic', '').strip()
+    if not query: return await update.message.reply_text("Напиши, что искать.")
+    await update.message.chat.send_action(action="upload_photo")
+    img_url = get_image_url(query)
+    if img_url: await update.message.reply_photo(img_url, caption=f"🔍 {query}")
+    else: await update.message.reply_text("❌ Не удалось найти.")
+
+async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user = get_user(user_id)
+    if user: await update.message.reply_text(f"⚡ Осталось {user['msg_limit']} сообщений.")
+
+# --- ЗАПУСК ---
+def main():
+    threading.Thread(target=run_flask, daemon=True).start()
+    threading.Thread(target=keep_alive, daemon=True).start()
+    
+    app_bot = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    app_bot.add_handler(CommandHandler("start", start))
+    app_bot.add_handler(CommandHandler("pic", pic_cmd))
+    app_bot.add_handler(CommandHandler("balance", balance_cmd))
+    app_bot.add_handler(CommandHandler("new", new_chat))
+    
+    app_bot.add_handler(CallbackQueryHandler(open_chat, pattern="open_chat"))
+    app_bot.add_handler(CallbackQueryHandler(new_chat, pattern="new_chat"))
+    app_bot.add_handler(CallbackQueryHandler(invites, pattern="invites"))
+    app_bot.add_handler(CallbackQueryHandler(settings, pattern="settings"))
+    app_bot.add_handler(CallbackQueryHandler(style_menu, pattern="style_menu"))
+    app_bot.add_handler(CallbackQueryHandler(my_stats, pattern="my_stats"))
+    app_bot.add_handler(CallbackQueryHandler(my_refs, pattern="my_refs"))
+    app_bot.add_handler(CallbackQueryHandler(help_cmd, pattern="help"))
+    app_bot.add_handler(CallbackQueryHandler(back_to_menu, pattern="back_to_menu"))
+    app_bot.add_handler(CallbackQueryHandler(copy_link, pattern="copy_link"))
+    
+    for style in STYLES.keys():
+        app_bot.add_handler(CallbackQueryHandler(lambda u, c, s=style: set_style(u, c, s), pattern=f"set_style_{style}"))
+    
+    app_bot.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, handle_message))
+
+    print("SKUF AI запущен на Render.")
+    app_bot.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == '__main__':
+    main()
