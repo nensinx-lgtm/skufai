@@ -3,3 +3,4 @@ openai
 gigachat
 beautifulsoup4
 requests
+flask
