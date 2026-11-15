@@ -1,4 +1,4 @@
-# language: Python, file: FallBack/skuf.py
+# language: Python, file: skuf.py
 import logging
 import sqlite3
 import random
@@ -61,6 +61,8 @@ cursor.execute('''CREATE TABLE IF NOT EXISTS users (
     username TEXT,
     sub_end REAL DEFAULT 0,
     msg_limit INTEGER DEFAULT 50,
+    daily_limit INTEGER DEFAULT 10,
+    daily_reset REAL DEFAULT 0,
     req_limit INTEGER DEFAULT 10,
     ref_by INTEGER DEFAULT 0,
     ref_count INTEGER DEFAULT 0,
@@ -85,40 +87,41 @@ STYLES = {
 
 # --- ФУНКЦИИ ---
 def get_user(user_id):
-    cursor.execute("SELECT id, username, sub_end, msg_limit, req_limit, ref_by, ref_count, registered, last_active, style FROM users WHERE id=?", (user_id,))
+    cursor.execute("SELECT id, username, sub_end, msg_limit, daily_limit, daily_reset, req_limit, ref_by, ref_count, registered, last_active, style FROM users WHERE id=?", (user_id,))
     res = cursor.fetchone()
     if not res: return None
-    return dict(zip(["id", "username", "sub_end", "msg_limit", "req_limit", "ref_by", "ref_count", "registered", "last_active", "style"], res))
+    return dict(zip(["id", "username", "sub_end", "msg_limit", "daily_limit", "daily_reset", "req_limit", "ref_by", "ref_count", "registered", "last_active", "style"], res))
 
 def create_user(user_id, username, ref_by=0):
     now = time.time()
-    cursor.execute("INSERT OR IGNORE INTO users (id, username, registered, last_active, ref_by) VALUES (?, ?, ?, ?, ?)", (user_id, username, now, now, ref_by))
+    if user_id == ADMIN_ID:
+        msg_limit = 999999
+        daily_limit = 999999
+    else:
+        msg_limit = 50
+        daily_limit = 10
+        
+    cursor.execute("INSERT OR IGNORE INTO users (id, username, registered, last_active, ref_by, msg_limit, daily_limit, daily_reset) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", 
+                   (user_id, username, now, now, ref_by, msg_limit, daily_limit, now))
     conn.commit()
     if ref_by:
-        cursor.execute("UPDATE users SET ref_count = ref_count + 1, msg_limit = msg_limit + 15, req_limit = req_limit + 5 WHERE id=?", (ref_by,))
+        cursor.execute("UPDATE users SET ref_count = ref_count + 1, msg_limit = msg_limit + 15, daily_limit = daily_limit + 5 WHERE id=?", (ref_by,))
         conn.commit()
 
 def update_activity(user_id):
     cursor.execute("UPDATE users SET last_active=? WHERE id=?", (time.time(), user_id))
     conn.commit()
 
-def get_image_url(query):
-    try:
-        url = "https://www.bing.com/images/search"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, params={"q": query, "first": 1}, headers=headers, timeout=10, verify=False)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        img_tags = soup.find_all('a', class_='iusc')
-        urls = []
-        for img in img_tags:
-            m_attr = img.get('m')
-            if m_attr:
-                try:
-                    data = json.loads(m_attr)
-                    if 'murl' in data: urls.append(data['murl'])
-                except: pass
-        return random.choice(urls[:5]) if urls else None
-    except: return None
+def check_daily_reset(user_id):
+    user = get_user(user_id)
+    if not user: return
+    if time.time() - user['daily_reset'] > 86400:
+        if user_id == ADMIN_ID:
+            new_limit = 999999
+        else:
+            new_limit = 10
+        cursor.execute("UPDATE users SET daily_limit=?, daily_reset=? WHERE id=?", (new_limit, time.time(), user_id))
+        conn.commit()
 
 # --- МЕНЮ ---
 def get_main_menu(user_id):
@@ -131,6 +134,18 @@ def get_main_menu(user_id):
 def get_chat_menu():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Начать новый чат", callback_data="new_chat"), InlineKeyboardButton("👥 Пригласить друга", callback_data="invites")]])
 
+def get_welcome_text(username):
+    return f"""
+👋 **Добро пожаловать в SKUF AI, {username}!**
+
+💡 **Что умею:** Писать коды и отвечать на вопросы.
+⚡ **Лимиты:** 10 сообщений в сутки (в чате — 50 сообщений).
+🎁 **Приглашения:** +5 запросов за друга.
+🔗 **Партнерка:** 49.9% с каждого платежа.
+
+👉 **Выбери действие:**
+    """
+
 # --- ОБРАБОТЧИКИ ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -142,51 +157,66 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except: pass
 
     if not get_user(user_id): create_user(user_id, username, ref_by)
-    else: update_activity(user_id)
+    else: 
+        update_activity(user_id)
+        check_daily_reset(user_id)
         
-    text = f"👋 **Добро пожаловать в SKUF AI, {username}!**\n\n💡 **Что умею:** Писать коды и искать картинки.\n🖼 `/pic [описание]` — найду картинку.\n⚡ **Лимиты:** 10 запросов в сутки (в чате — 50 сообщений).\n🎁 **Приглашения:** +5 запросов за друга.\n🔗 **Партнерка:** 49.9% с каждого платежа.\n\n👉 **Выбери действие:**"
+    text = get_welcome_text(username)
     await update.message.reply_text(text, reply_markup=get_main_menu(user_id), parse_mode='Markdown')
 
 async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    await query.message.delete()
-    await query.message.chat.send_message("👋 **Главное меню:**", reply_markup=get_main_menu(query.from_user.id), parse_mode='Markdown')
-
-async def open_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
     user_id = query.from_user.id
-    user = get_user(user_id)
+    username = query.from_user.first_name
     
-    if user_id in user_bans or cursor.execute("SELECT 1 FROM bans WHERE id=?", (user_id,)).fetchone():
-        return await query.answer("⏳ Вы забанены.", show_alert=True)
-    
-    if user['msg_limit'] <= 0:
-        text = "🚫 **Достигнут предел чата.**\nТы отправил уже 50 сообщений. Начни новый чат или пригласи друга (+15 сообщений)."
-        return await query.edit_message_text(text, reply_markup=get_chat_menu(), parse_mode='Markdown')
-    
-    if user_id not in user_sessions:
-        user_sessions[user_id] = [{"role": "system", "content": STYLES.get(user.get("style", "default"), STYLES["default"])}]
-    
-    await query.edit_message_text(f"💬 Чат открыт. Осталось сообщений: {user['msg_limit']}.")
+    await query.message.delete()
+    text = get_welcome_text(username)
+    await query.message.chat.send_message(text, reply_markup=get_main_menu(user_id), parse_mode='Markdown')
 
 async def new_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
+    check_daily_reset(user_id)
+    
+    cursor.execute("UPDATE users SET msg_limit = 50 WHERE id=?", (user_id,))
+    conn.commit()
+    
     user = get_user(user_id)
-    if user['msg_limit'] <= 0:
-        return await query.answer("🚫 Лимит исчерпан. Пригласи друга.", show_alert=True)
     user_sessions[user_id] = [{"role": "system", "content": STYLES.get(user.get("style", "default"), STYLES["default"])}]
-    await query.edit_message_text(f"💬 Новый чат создан. Осталось: {user['msg_limit']}.")
+    
+    await query.edit_message_text(f"💬 Новый чат создан. Лимит чата сброшен (50 сообщений).")
+
+async def open_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    check_daily_reset(user_id)
+    user = get_user(user_id)
+    
+    if cursor.execute("SELECT 1 FROM bans WHERE id=?", (user_id,)).fetchone():
+        return await query.answer("⏳ Вы забанены.", show_alert=True)
+    
+    if user['daily_limit'] <= 0 and user_id != ADMIN_ID:
+        text = "🚫 **Дневной лимит исчерпан (10 сообщений).**\nПриходи завтра или пригласи друга (+5 сообщений)."
+        return await query.edit_message_text(text, reply_markup=get_chat_menu(), parse_mode='Markdown')
+        
+    if user['msg_limit'] <= 0:
+        text = "🚫 **Достигнут предел чата (50 сообщений).**\nНачни новый чат или пригласи друга (+15 сообщений)."
+        return await query.edit_message_text(text, reply_markup=get_chat_menu(), parse_mode='Markdown')
+    
+    if user_id not in user_sessions:
+        user_sessions[user_id] = [{"role": "system", "content": STYLES.get(user.get("style", "default"), STYLES["default"])}]
+    
+    await query.edit_message_text(f"💬 Чат открыт.\n📅 Осталось на сегодня: {user['daily_limit']}\n💬 Осталось в чате: {user['msg_limit']}")
 
 async def invites(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
     link = f"https://t.me/{(await context.bot.get_me()).username}?start=ref_{user_id}"
-    text = f"🔗 **Твоя ссылка:**\n`{link}`\n\n🎁 +15 сообщений и +5 запросов за друга.\n💰 49.9% с платежей."
+    text = f"🔗 **Твоя ссылка:**\n`{link}`\n\n🎁 +15 сообщений в чат и +5 запросов за друга.\n💰 49.9% с платежей."
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📋 Скопировать", callback_data="copy_link")], [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")]]), parse_mode='Markdown')
 
 async def copy_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -226,7 +256,7 @@ async def my_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user = get_user(query.from_user.id)
-    text = f"📊 **Статистика:**\n\n💬 Сообщений: {user['msg_limit']} / 50\n🎁 Друзей: {user['ref_count']}\n⚡ Лимит: {user['msg_limit']}"
+    text = f"📊 **Статистика:**\n\n💬 Сообщений в чате: {user['msg_limit']} / 50\n📅 Осталось на сегодня: {user['daily_limit']} / 10\n🎁 Друзей: {user['ref_count']}"
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="settings")]]), parse_mode='Markdown')
 
 async def my_refs(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -240,7 +270,7 @@ async def my_refs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    text = f"❓ **Помощь:**\n\n• Пиши вопрос — отвечу.\n• `/pic` — найду картинку.\n• `/new` — новый чат.\n• `/balance` — остаток.\n\nАдмин: @{ADMIN_USERNAME}"
+    text = f"❓ **Помощь:**\n\n• Пиши вопрос — отвечу.\n• `/new` — новый чат.\n• `/balance` — остаток.\n\nАдмин: @{ADMIN_USERNAME}"
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💬 Админ", url=f"https://t.me/{ADMIN_USERNAME}")], [InlineKeyboardButton("⬅️ Назад", callback_data="settings")]]), parse_mode='Markdown')
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -253,8 +283,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if cursor.execute("SELECT 1 FROM bans WHERE id=?", (user_id,)).fetchone():
         return await update.message.reply_text("⏳ Вы забанены.")
 
-    if user['msg_limit'] <= 0:
-        text_err = "🚫 **Достигнут предел.** Начни новый чат или пригласи друга."
+    check_daily_reset(user_id)
+    user = get_user(user_id)
+
+    if user['daily_limit'] <= 0 and user_id != ADMIN_ID:
+        text_err = "🚫 **Дневной лимит исчерпан (10 сообщений).** Приходи завтра."
+        return await update.message.reply_text(text_err, reply_markup=get_chat_menu(), parse_mode='Markdown')
+
+    if user['msg_limit'] <= 0 and user_id != ADMIN_ID:
+        text_err = "🚫 **Достигнут предел чата.** Начни новый чат."
         return await update.message.reply_text(text_err, reply_markup=get_chat_menu(), parse_mode='Markdown')
 
     if user_id not in user_sessions:
@@ -298,8 +335,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             bot_reply = re.sub(r'<think>.*?</think>', '', bot_reply, flags=re.DOTALL).strip()
             history.append({"role": "assistant", "content": bot_reply})
             if len(history) > 21: user_sessions[user_id] = [history[0]] + history[-20:]
-            cursor.execute("UPDATE users SET msg_limit = msg_limit - 1 WHERE id=?", (user_id,))
-            conn.commit()
+            
+            if user_id != ADMIN_ID:
+                cursor.execute("UPDATE users SET daily_limit = daily_limit - 1, msg_limit = msg_limit - 1 WHERE id=?", (user_id,))
+                conn.commit()
+            
             await update.message.reply_text(bot_reply)
 
     except Exception as e:
@@ -307,18 +347,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         user_locks[user_id] = False
 
-async def pic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.message.text.replace('/pic', '').strip()
-    if not query: return await update.message.reply_text("Напиши, что искать.")
-    await update.message.chat.send_action(action="upload_photo")
-    img_url = get_image_url(query)
-    if img_url: await update.message.reply_photo(img_url, caption=f"🔍 {query}")
-    else: await update.message.reply_text("❌ Не удалось найти.")
-
 async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user = get_user(user_id)
-    if user: await update.message.reply_text(f"⚡ Осталось {user['msg_limit']} сообщений.")
+    if user: await update.message.reply_text(f"📅 Осталось на сегодня: {user['daily_limit']}\n💬 Осталось в чате: {user['msg_limit']}")
 
 # --- ЗАПУСК ---
 def main():
@@ -328,7 +360,6 @@ def main():
     app_bot = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app_bot.add_handler(CommandHandler("start", start))
-    app_bot.add_handler(CommandHandler("pic", pic_cmd))
     app_bot.add_handler(CommandHandler("balance", balance_cmd))
     app_bot.add_handler(CommandHandler("new", new_chat))
     
@@ -348,7 +379,7 @@ def main():
     
     app_bot.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, handle_message))
 
-    print("SKUF AI запущен на Render.")
+    print("SKUF AI запущен на Render (без /pic).")
     app_bot.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
