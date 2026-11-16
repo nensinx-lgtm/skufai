@@ -1,4 +1,4 @@
-python-telegram-bot[webhooks]==21.1.1
+python-telegram-bot==21.1.1
 openai
 gigachat
 beautifulsoup4
