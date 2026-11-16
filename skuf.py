@@ -8,6 +8,7 @@ import time
 import re
 import ssl
 import os
+import asyncio
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from openai import OpenAI
@@ -29,7 +30,7 @@ ZAI_API_KEY = "db05e8f6f2444ee3b605624db998708c.uQ6HPlI60NpBZBT8"
 ADMIN_ID = 7126354372
 ADMIN_USERNAME = "m0_nk1"
 
-# --- URL RENDER ---
+# --- URL RENDER (ОБЯЗАТЕЛЬНО ТВОЙ URL) ---
 WEBHOOK_URL = "https://skufai.onrender.com" 
 
 # --- КЛИЕНТЫ ---
@@ -65,7 +66,6 @@ user_bans = {}
 # --- СТИЛИ ---
 STYLES = {
     "default": "Ты — SKUF AI. Отвечай четко, по делу.",
-    
     "aggressive": (
         "Ты — SKUF AI в режиме максимальной агрессии. Ты конченый грубиян, который презирает всех вокруг. "
         "Твоя задача — максимально жестко, с матом, оскорблениями и унижением отвечать собеседнику. "
@@ -75,7 +75,6 @@ STYLES = {
         "Твой стиль — это стиль быдла из подворотни. Никакой вежливости, только агрессия и хамство. "
         "Ты не ассистент, ты — быдло-бот, который ненавидит всех пользователей."
     ),
-    
     "coder": "Ты — SKUF AI в режиме кодера. Пиши только код.",
     "fast": "Ты — SKUF AI в быстром режиме. Отвечай очень коротко."
 }
@@ -141,7 +140,7 @@ def get_welcome_text(username):
 👉 **Выбери действие:**
     """
 
-# --- ОБРАБОТЧИКИ ---
+# --- ОБРАБОТЧИКИ (ASYNC) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     username = update.effective_user.first_name
@@ -368,7 +367,7 @@ def health():
 def webhook():
     if request.method == "POST":
         update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-        telegram_app.update_queue.put_nowait(update)
+        asyncio.run(telegram_app.process_update(update))
         return "ok", 200
 
 @flask_app.route('/set_webhook')
@@ -378,5 +377,6 @@ def set_webhook():
     return res.text
 
 if __name__ == "__main__":
+    asyncio.run(telegram_app.initialize())
     port = int(os.environ.get("PORT", 8080))
     flask_app.run(host="0.0.0.0", port=port)
