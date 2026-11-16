@@ -8,6 +8,8 @@ import time
 import re
 import ssl
 import os
+import asyncio
+import threading
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from openai import OpenAI
@@ -15,6 +17,7 @@ from gigachat import GigaChat
 from gigachat.models import Chat, Messages, MessagesRole
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+from flask import Flask, request
 
 # --- SSL ---
 ssl._create_default_https_context = ssl._create_unverified_context
@@ -27,9 +30,7 @@ GIGA_AUTH_KEY = "MDFhMWQxYWYtOTg1NC03Y2E5LTg2YjQtOTc1ZTM0YzRmNTQxOjg3M2ZiN2E4LTY
 ZAI_API_KEY = "db05e8f6f2444ee3b605624db998708c.uQ6HPlI60NpBZBT8" 
 ADMIN_ID = 7126354372
 ADMIN_USERNAME = "m0_nk1"
-
-# --- URL RENDER (БЕЗ СЛЭША) ---
-WEBHOOK_URL = "https://skufai.onrender.com" 
+WEBHOOK_URL = "https://chatgpt-skuf-ai.onrender.com" 
 
 # --- КЛИЕНТЫ ---
 giga = GigaChat(credentials=GIGA_AUTH_KEY, scope="GIGACHAT_API_PERS", model="GigaChat-2-Max", verify_ssl_certs=False, timeout=30)
@@ -335,37 +336,64 @@ async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user(user_id)
     if user: await update.message.reply_text(f"📅 Осталось на сегодня: {user['daily_limit']}\n💬 Осталось в чате: {user['msg_limit']}")
 
-# --- ЗАПУСК (ВСТРОЕННЫЙ ВЕБХУК, БЕЗ FLASK) ---
-def main():
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+# --- НИЖНЯЯ ЧАСТЬ: FLASK + ПРАВИЛЬНАЯ АСИНХРОННОСТЬ ---
+flask_app = Flask(__name__)
+telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("balance", balance_cmd))
-    app.add_handler(CommandHandler("new", new_chat))
-    app.add_handler(CallbackQueryHandler(open_chat, pattern="open_chat"))
-    app.add_handler(CallbackQueryHandler(new_chat, pattern="new_chat"))
-    app.add_handler(CallbackQueryHandler(invites, pattern="invites"))
-    app.add_handler(CallbackQueryHandler(settings, pattern="settings"))
-    app.add_handler(CallbackQueryHandler(style_menu, pattern="style_menu"))
-    app.add_handler(CallbackQueryHandler(my_stats, pattern="my_stats"))
-    app.add_handler(CallbackQueryHandler(my_refs, pattern="my_refs"))
-    app.add_handler(CallbackQueryHandler(help_cmd, pattern="help"))
-    app.add_handler(CallbackQueryHandler(back_to_menu, pattern="back_to_menu"))
-    app.add_handler(CallbackQueryHandler(copy_link, pattern="copy_link"))
-    for style in STYLES.keys():
-        app.add_handler(CallbackQueryHandler(lambda u, c, s=style: set_style(u, c, s), pattern=f"set_style_{style}"))
-    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, handle_message))
+# Регистрируем хендлеры
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CommandHandler("balance", balance_cmd))
+telegram_app.add_handler(CommandHandler("new", new_chat))
+telegram_app.add_handler(CallbackQueryHandler(open_chat, pattern="open_chat"))
+telegram_app.add_handler(CallbackQueryHandler(new_chat, pattern="new_chat"))
+telegram_app.add_handler(CallbackQueryHandler(invites, pattern="invites"))
+telegram_app.add_handler(CallbackQueryHandler(settings, pattern="settings"))
+telegram_app.add_handler(CallbackQueryHandler(style_menu, pattern="style_menu"))
+telegram_app.add_handler(CallbackQueryHandler(my_stats, pattern="my_stats"))
+telegram_app.add_handler(CallbackQueryHandler(my_refs, pattern="my_refs"))
+telegram_app.add_handler(CallbackQueryHandler(help_cmd, pattern="help"))
+telegram_app.add_handler(CallbackQueryHandler(back_to_menu, pattern="back_to_menu"))
+telegram_app.add_handler(CallbackQueryHandler(copy_link, pattern="copy_link"))
+for style in STYLES.keys():
+    telegram_app.add_handler(CallbackQueryHandler(lambda u, c, s=style: set_style(u, c, s), pattern=f"set_style_{style}"))
+telegram_app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, handle_message))
 
-    # Render дает порт через переменную окружения PORT
-    port = int(os.environ.get("PORT", 8080))
+# Главная страница, чтобы Render видел, что сервис живой (решает 404)
+@flask_app.route('/')
+def health():
+    return "SKUF AI is running!", 200
+
+# Вебхук, который корректно передает апдейты в цикл событий Telegram
+@flask_app.route(f'/{TELEGRAM_TOKEN}', methods=['POST'])
+def webhook():
+    if request.method == "POST":
+        update = Update.de_json(request.get_json(force=True), telegram_app.bot)
+        # Отправляем в очередь, которую обрабатывает фоновый цикл
+        telegram_app.update_queue.put_nowait(update)
+        return "ok", 200
+
+# Принудительная установка вебхука при первом запросе
+@flask_app.route('/set_webhook')
+def set_webhook():
+    url = f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}"
+    res = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook?url={url}")
+    return res.text
+
+# Запускаем асинхронный цикл в фоне, чтобы бот мог обрабатывать очередь
+def run_async_loop():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     
-    # Запускаем встроенный вебхук
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=port,
-        url_path=TELEGRAM_TOKEN,
-        webhook_url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}"
-    )
+    async def start_bot():
+        await telegram_app.initialize()
+        await telegram_app.start()
+        
+    loop.run_until_complete(start_bot())
+    loop.run_forever()
 
 if __name__ == "__main__":
-    main()
+    # Запускаем фоновый поток для телеграма
+    threading.Thread(target=run_async_loop, daemon=True).start()
+    
+    port = int(os.environ.get("PORT", 8080))
+    flask_app.run(host="0.0.0.0", port=port)
