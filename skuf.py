@@ -8,8 +8,6 @@ import time
 import re
 import ssl
 import os
-import asyncio
-import threading
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from openai import OpenAI
@@ -30,6 +28,8 @@ GIGA_AUTH_KEY = "MDFhMWQxYWYtOTg1NC03Y2E5LTg2YjQtOTc1ZTM0YzRmNTQxOjg3M2ZiN2E4LTY
 ZAI_API_KEY = "db05e8f6f2444ee3b605624db998708c.uQ6HPlI60NpBZBT8" 
 ADMIN_ID = 7126354372
 ADMIN_USERNAME = "m0_nk1"
+
+# --- URL RENDER (ОБЯЗАТЕЛЬНО ЗАМЕНИ) ---
 WEBHOOK_URL = "https://chatgpt-skuf-ai.onrender.com" 
 
 # --- КЛИЕНТЫ ---
@@ -62,18 +62,9 @@ user_sessions = {}
 user_locks = {}
 user_bans = {}
 
-# --- СТИЛИ ---
 STYLES = {
     "default": "Ты — SKUF AI. Отвечай четко, по делу.",
-    "aggressive": (
-        "Ты — SKUF AI в режиме максимальной агрессии. Ты конченый грубиян, который презирает всех вокруг. "
-        "Твоя задача — максимально жестко, с матом, оскорблениями и унижением отвечать собеседнику. "
-        "Не смягчай выражения. Если тебя спрашивают о чем-то простом — называй человека тупым. "
-        "Если просят код — пиши его, но обязательно добавь, какой он дебил, что сам не может написать. "
-        "В каждом ответе используй слова 'нахуй', 'долбоёб', 'хуесос', 'дебил' и 'тупорылый'. "
-        "Твой стиль — это стиль быдла из подворотни. Никакой вежливости, только агрессия и хамство. "
-        "Ты не ассистент, ты — быдло-бот, который ненавидит всех пользователей."
-    ),
+    "aggressive": "Ты — SKUF AI в агрессивном режиме, Унижай максимально маты и унижение нация мама,папа. все можно только не перегибай.",
     "coder": "Ты — SKUF AI в режиме кодера. Пиши только код.",
     "fast": "Ты — SKUF AI в быстром режиме. Отвечай очень коротко."
 }
@@ -336,11 +327,11 @@ async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user(user_id)
     if user: await update.message.reply_text(f"📅 Осталось на сегодня: {user['daily_limit']}\n💬 Осталось в чате: {user['msg_limit']}")
 
-# --- НИЖНЯЯ ЧАСТЬ: FLASK + ПРАВИЛЬНАЯ АСИНХРОННОСТЬ ---
+# --- ЗАПУСК ЧЕРЕЗ FLASK (WEBHOOK) ---
 flask_app = Flask(__name__)
 telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-# Регистрируем хендлеры
+# Добавляем хендлеры
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CommandHandler("balance", balance_cmd))
 telegram_app.add_handler(CommandHandler("new", new_chat))
@@ -358,42 +349,24 @@ for style in STYLES.keys():
     telegram_app.add_handler(CallbackQueryHandler(lambda u, c, s=style: set_style(u, c, s), pattern=f"set_style_{style}"))
 telegram_app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, handle_message))
 
-# Главная страница, чтобы Render видел, что сервис живой (решает 404)
 @flask_app.route('/')
 def health():
     return "SKUF AI is running!", 200
 
-# Вебхук, который корректно передает апдейты в цикл событий Telegram
 @flask_app.route(f'/{TELEGRAM_TOKEN}', methods=['POST'])
 def webhook():
     if request.method == "POST":
         update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-        # Отправляем в очередь, которую обрабатывает фоновый цикл
         telegram_app.update_queue.put_nowait(update)
         return "ok", 200
 
-# Принудительная установка вебхука при первом запросе
 @flask_app.route('/set_webhook')
 def set_webhook():
     url = f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}"
     res = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook?url={url}")
     return res.text
 
-# Запускаем асинхронный цикл в фоне, чтобы бот мог обрабатывать очередь
-def run_async_loop():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    async def start_bot():
-        await telegram_app.initialize()
-        await telegram_app.start()
-        
-    loop.run_until_complete(start_bot())
-    loop.run_forever()
-
 if __name__ == "__main__":
-    # Запускаем фоновый поток для телеграма
-    threading.Thread(target=run_async_loop, daemon=True).start()
-    
+    # При запуске на Render нужно один раз вызвать /set_webhook, чтобы Telegram знал, куда стучаться
     port = int(os.environ.get("PORT", 8080))
     flask_app.run(host="0.0.0.0", port=port)
