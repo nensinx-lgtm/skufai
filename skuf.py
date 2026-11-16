@@ -8,6 +8,7 @@ import time
 import re
 import ssl
 import os
+import threading
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from openai import OpenAI
@@ -15,7 +16,7 @@ from gigachat import GigaChat
 from gigachat.models import Chat, Messages, MessagesRole
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
-from flask import Flask, request
+from flask import Flask
 
 # --- SSL ---
 ssl._create_default_https_context = ssl._create_unverified_context
@@ -28,9 +29,6 @@ GIGA_AUTH_KEY = "MDFhMWQxYWYtOTg1NC03Y2E5LTg2YjQtOTc1ZTM0YzRmNTQxOjg3M2ZiN2E4LTY
 ZAI_API_KEY = "db05e8f6f2444ee3b605624db998708c.uQ6HPlI60NpBZBT8" 
 ADMIN_ID = 7126354372
 ADMIN_USERNAME = "m0_nk1"
-
-# --- URL RENDER (ОБЯЗАТЕЛЬНО ЗАМЕНИ) ---
-WEBHOOK_URL = "https://chatgpt-skuf-ai.onrender.com" 
 
 # --- КЛИЕНТЫ ---
 giga = GigaChat(credentials=GIGA_AUTH_KEY, scope="GIGACHAT_API_PERS", model="GigaChat-2-Max", verify_ssl_certs=False, timeout=30)
@@ -64,7 +62,7 @@ user_bans = {}
 
 STYLES = {
     "default": "Ты — SKUF AI. Отвечай четко, по делу.",
-    "aggressive": "Ты — SKUF AI в агрессивном режиме, Унижай максимально маты и унижение нация мама,папа. все можно только не перегибай.",
+    "aggressive": "Ты — SKUF AI в агрессивном режиме. Отвечай дерзко, с матом.",
     "coder": "Ты — SKUF AI в режиме кодера. Пиши только код.",
     "fast": "Ты — SKUF AI в быстром режиме. Отвечай очень коротко."
 }
@@ -327,46 +325,44 @@ async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user(user_id)
     if user: await update.message.reply_text(f"📅 Осталось на сегодня: {user['daily_limit']}\n💬 Осталось в чате: {user['msg_limit']}")
 
-# --- ЗАПУСК ЧЕРЕЗ FLASK (WEBHOOK) ---
-flask_app = Flask(__name__)
-telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
+# --- ЗАПУСК ---
+def main():
+    # Создаем Flask-заглушку для Render (он требует, чтобы был открыт порт)
+    app = Flask(__name__)
+    
+    @app.route('/')
+    def health():
+        return "SKUF AI is running!", 200
 
-# Добавляем хендлеры
-telegram_app.add_handler(CommandHandler("start", start))
-telegram_app.add_handler(CommandHandler("balance", balance_cmd))
-telegram_app.add_handler(CommandHandler("new", new_chat))
-telegram_app.add_handler(CallbackQueryHandler(open_chat, pattern="open_chat"))
-telegram_app.add_handler(CallbackQueryHandler(new_chat, pattern="new_chat"))
-telegram_app.add_handler(CallbackQueryHandler(invites, pattern="invites"))
-telegram_app.add_handler(CallbackQueryHandler(settings, pattern="settings"))
-telegram_app.add_handler(CallbackQueryHandler(style_menu, pattern="style_menu"))
-telegram_app.add_handler(CallbackQueryHandler(my_stats, pattern="my_stats"))
-telegram_app.add_handler(CallbackQueryHandler(my_refs, pattern="my_refs"))
-telegram_app.add_handler(CallbackQueryHandler(help_cmd, pattern="help"))
-telegram_app.add_handler(CallbackQueryHandler(back_to_menu, pattern="back_to_menu"))
-telegram_app.add_handler(CallbackQueryHandler(copy_link, pattern="copy_link"))
-for style in STYLES.keys():
-    telegram_app.add_handler(CallbackQueryHandler(lambda u, c, s=style: set_style(u, c, s), pattern=f"set_style_{style}"))
-telegram_app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, handle_message))
+    # Запускаем Flask в отдельном потоке
+    def run_flask():
+        port = int(os.environ.get("PORT", 8080))
+        app.run(host="0.0.0.0", port=port)
 
-@flask_app.route('/')
-def health():
-    return "SKUF AI is running!", 200
+    threading.Thread(target=run_flask, daemon=True).start()
 
-@flask_app.route(f'/{TELEGRAM_TOKEN}', methods=['POST'])
-def webhook():
-    if request.method == "POST":
-        update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-        telegram_app.update_queue.put_nowait(update)
-        return "ok", 200
+    # Создаем и запускаем Telegram-бота (Polling)
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-@flask_app.route('/set_webhook')
-def set_webhook():
-    url = f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}"
-    res = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook?url={url}")
-    return res.text
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("balance", balance_cmd))
+    application.add_handler(CommandHandler("new", new_chat))
+    application.add_handler(CallbackQueryHandler(open_chat, pattern="open_chat"))
+    application.add_handler(CallbackQueryHandler(new_chat, pattern="new_chat"))
+    application.add_handler(CallbackQueryHandler(invites, pattern="invites"))
+    application.add_handler(CallbackQueryHandler(settings, pattern="settings"))
+    application.add_handler(CallbackQueryHandler(style_menu, pattern="style_menu"))
+    application.add_handler(CallbackQueryHandler(my_stats, pattern="my_stats"))
+    application.add_handler(CallbackQueryHandler(my_refs, pattern="my_refs"))
+    application.add_handler(CallbackQueryHandler(help_cmd, pattern="help"))
+    application.add_handler(CallbackQueryHandler(back_to_menu, pattern="back_to_menu"))
+    application.add_handler(CallbackQueryHandler(copy_link, pattern="copy_link"))
+    for style in STYLES.keys():
+        application.add_handler(CallbackQueryHandler(lambda u, c, s=style: set_style(u, c, s), pattern=f"set_style_{style}"))
+    application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, handle_message))
+
+    # Запускаем бота в режиме опроса (Polling)
+    application.run_polling()
 
 if __name__ == "__main__":
-    # При запуске на Render нужно один раз вызвать /set_webhook, чтобы Telegram знал, куда стучаться
-    port = int(os.environ.get("PORT", 8080))
-    flask_app.run(host="0.0.0.0", port=port)
+    main()
