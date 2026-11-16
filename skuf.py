@@ -8,7 +8,6 @@ import time
 import re
 import ssl
 import os
-import threading
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from openai import OpenAI
@@ -16,7 +15,7 @@ from gigachat import GigaChat
 from gigachat.models import Chat, Messages, MessagesRole
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
-from flask import Flask
+from flask import Flask, request
 
 # --- SSL ---
 ssl._create_default_https_context = ssl._create_unverified_context
@@ -30,28 +29,13 @@ ZAI_API_KEY = "db05e8f6f2444ee3b605624db998708c.uQ6HPlI60NpBZBT8"
 ADMIN_ID = 7126354372
 ADMIN_USERNAME = "m0_nk1"
 
+# --- URL RENDER ---
+WEBHOOK_URL = "https://skufai.onrender.com" 
+
 # --- КЛИЕНТЫ ---
 giga = GigaChat(credentials=GIGA_AUTH_KEY, scope="GIGACHAT_API_PERS", model="GigaChat-2-Max", verify_ssl_certs=False, timeout=30)
 client_zai = OpenAI(api_key=ZAI_API_KEY, base_url="https://api.z.ai/api/paas/v4/")
 MODEL_ZAI = "glm-4.5"
-
-# --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
-app = Flask(__name__)
-@app.route('/')
-def health_check():
-    return "SKUF AI is running!", 200
-
-def run_flask():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
-
-def keep_alive():
-    while True:
-        time.sleep(600)
-        try:
-            url = os.getenv("RENDER_EXTERNAL_URL", "https://skufai.onrender.com")
-            requests.get(url, timeout=10)
-        except: pass
 
 # --- БАЗА ---
 conn = sqlite3.connect('skuf.db', check_same_thread=False)
@@ -78,9 +62,20 @@ user_sessions = {}
 user_locks = {}
 user_bans = {}
 
+# --- СТИЛИ ---
 STYLES = {
     "default": "Ты — SKUF AI. Отвечай четко, по делу.",
-    "aggressive": "Ты — SKUF AI в агрессивном режиме. Отвечай дерзко, с матом.",
+    
+    "aggressive": (
+        "Ты — SKUF AI в режиме максимальной агрессии. Ты конченый грубиян, который презирает всех вокруг. "
+        "Твоя задача — максимально жестко, с матом, оскорблениями и унижением отвечать собеседнику. "
+        "Не смягчай выражения. Если тебя спрашивают о чем-то простом — называй человека тупым. "
+        "Если просят код — пиши его, но обязательно добавь, какой он дебил, что сам не может написать. "
+        "В каждом ответе используй слова 'нахуй', 'долбоёб', 'хуесос', 'дебил' и 'тупорылый'. "
+        "Твой стиль — это стиль быдла из подворотни. Никакой вежливости, только агрессия и хамство. "
+        "Ты не ассистент, ты — быдло-бот, который ненавидит всех пользователей."
+    ),
+    
     "coder": "Ты — SKUF AI в режиме кодера. Пиши только код.",
     "fast": "Ты — SKUF AI в быстром режиме. Отвечай очень коротко."
 }
@@ -169,7 +164,6 @@ async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     user_id = query.from_user.id
     username = query.from_user.first_name
-    
     await query.message.delete()
     text = get_welcome_text(username)
     await query.message.chat.send_message(text, reply_markup=get_main_menu(user_id), parse_mode='Markdown')
@@ -179,13 +173,10 @@ async def new_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     user_id = query.from_user.id
     check_daily_reset(user_id)
-    
     cursor.execute("UPDATE users SET msg_limit = 50 WHERE id=?", (user_id,))
     conn.commit()
-    
     user = get_user(user_id)
     user_sessions[user_id] = [{"role": "system", "content": STYLES.get(user.get("style", "default"), STYLES["default"])}]
-    
     await query.edit_message_text(f"💬 Новый чат создан. Лимит чата сброшен (50 сообщений).")
 
 async def open_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -194,21 +185,16 @@ async def open_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     check_daily_reset(user_id)
     user = get_user(user_id)
-    
     if cursor.execute("SELECT 1 FROM bans WHERE id=?", (user_id,)).fetchone():
         return await query.answer("⏳ Вы забанены.", show_alert=True)
-    
     if user['daily_limit'] <= 0 and user_id != ADMIN_ID:
         text = "🚫 **Дневной лимит исчерпан (10 сообщений).**\nПриходи завтра или пригласи друга (+5 сообщений)."
         return await query.edit_message_text(text, reply_markup=get_chat_menu(), parse_mode='Markdown')
-        
     if user['msg_limit'] <= 0:
         text = "🚫 **Достигнут предел чата (50 сообщений).**\nНачни новый чат или пригласи друга (+15 сообщений)."
         return await query.edit_message_text(text, reply_markup=get_chat_menu(), parse_mode='Markdown')
-    
     if user_id not in user_sessions:
         user_sessions[user_id] = [{"role": "system", "content": STYLES.get(user.get("style", "default"), STYLES["default"])}]
-    
     await query.edit_message_text(f"💬 Чат открыт.\n📅 Осталось на сегодня: {user['daily_limit']}\n💬 Осталось в чате: {user['msg_limit']}")
 
 async def invites(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -352,35 +338,45 @@ async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user(user_id)
     if user: await update.message.reply_text(f"📅 Осталось на сегодня: {user['daily_limit']}\n💬 Осталось в чате: {user['msg_limit']}")
 
-# --- ЗАПУСК ---
-def main():
-    threading.Thread(target=run_flask, daemon=True).start()
-    threading.Thread(target=keep_alive, daemon=True).start()
-    
-    app_bot = Application.builder().token(TELEGRAM_TOKEN).build()
+# --- ЗАПУСК ЧЕРЕЗ FLASK (WEBHOOK) ---
+flask_app = Flask(__name__)
+telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    app_bot.add_handler(CommandHandler("start", start))
-    app_bot.add_handler(CommandHandler("balance", balance_cmd))
-    app_bot.add_handler(CommandHandler("new", new_chat))
-    
-    app_bot.add_handler(CallbackQueryHandler(open_chat, pattern="open_chat"))
-    app_bot.add_handler(CallbackQueryHandler(new_chat, pattern="new_chat"))
-    app_bot.add_handler(CallbackQueryHandler(invites, pattern="invites"))
-    app_bot.add_handler(CallbackQueryHandler(settings, pattern="settings"))
-    app_bot.add_handler(CallbackQueryHandler(style_menu, pattern="style_menu"))
-    app_bot.add_handler(CallbackQueryHandler(my_stats, pattern="my_stats"))
-    app_bot.add_handler(CallbackQueryHandler(my_refs, pattern="my_refs"))
-    app_bot.add_handler(CallbackQueryHandler(help_cmd, pattern="help"))
-    app_bot.add_handler(CallbackQueryHandler(back_to_menu, pattern="back_to_menu"))
-    app_bot.add_handler(CallbackQueryHandler(copy_link, pattern="copy_link"))
-    
-    for style in STYLES.keys():
-        app_bot.add_handler(CallbackQueryHandler(lambda u, c, s=style: set_style(u, c, s), pattern=f"set_style_{style}"))
-    
-    app_bot.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, handle_message))
+# Добавляем хендлеры
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CommandHandler("balance", balance_cmd))
+telegram_app.add_handler(CommandHandler("new", new_chat))
+telegram_app.add_handler(CallbackQueryHandler(open_chat, pattern="open_chat"))
+telegram_app.add_handler(CallbackQueryHandler(new_chat, pattern="new_chat"))
+telegram_app.add_handler(CallbackQueryHandler(invites, pattern="invites"))
+telegram_app.add_handler(CallbackQueryHandler(settings, pattern="settings"))
+telegram_app.add_handler(CallbackQueryHandler(style_menu, pattern="style_menu"))
+telegram_app.add_handler(CallbackQueryHandler(my_stats, pattern="my_stats"))
+telegram_app.add_handler(CallbackQueryHandler(my_refs, pattern="my_refs"))
+telegram_app.add_handler(CallbackQueryHandler(help_cmd, pattern="help"))
+telegram_app.add_handler(CallbackQueryHandler(back_to_menu, pattern="back_to_menu"))
+telegram_app.add_handler(CallbackQueryHandler(copy_link, pattern="copy_link"))
+for style in STYLES.keys():
+    telegram_app.add_handler(CallbackQueryHandler(lambda u, c, s=style: set_style(u, c, s), pattern=f"set_style_{style}"))
+telegram_app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, handle_message))
 
-    print("SKUF AI запущен на Render (без /pic).")
-    app_bot.run_polling(allowed_updates=Update.ALL_TYPES)
+@flask_app.route('/')
+def health():
+    return "SKUF AI is running!", 200
 
-if __name__ == '__main__':
-    main()
+@flask_app.route(f'/{TELEGRAM_TOKEN}', methods=['POST'])
+def webhook():
+    if request.method == "POST":
+        update = Update.de_json(request.get_json(force=True), telegram_app.bot)
+        telegram_app.update_queue.put_nowait(update)
+        return "ok", 200
+
+@flask_app.route('/set_webhook')
+def set_webhook():
+    url = f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}"
+    res = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook?url={url}")
+    return res.text
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+    flask_app.run(host="0.0.0.0", port=port)
