@@ -24,11 +24,12 @@ os.environ['PYTHONHTTPSVERIFY'] = '0'
 os.environ['CURL_CA_BUNDLE'] = ''
 
 # --- НАСТРОЙКИ ---
-TELEGRAM_TOKEN = "9246046750:AAEHxks0Fgu4BKO27R_Rdi5wF-LFvxdygUE" 
+TELEGRAM_TOKEN = "9246046750:AAEHxks0Fgu4BKO27R_Rdi5wF-LFvxdygUE"
 GIGA_AUTH_KEY = "MDFhMWQxYWYtOTg1NC03Y2E5LTg2YjQtOTc1ZTM0YzRmNTQxOjg3M2ZiN2E4LTY4MjUtNDNiZC1iZmVmLWMwMzI0ZDBiN2E2Ng=="
-ZAI_API_KEY = "db05e8f6f2444ee3b605624db998708c.uQ6HPlI60NpBZBT8" 
+ZAI_API_KEY = "db05e8f6f2444ee3b605624db998708c.uQ6HPlI60NpBZBT8"
 ADMIN_ID = 7126354372
 ADMIN_USERNAME = "m0_nk1"
+CHANNEL_USERNAME = "@skufv2"
 
 # --- КЛИЕНТЫ ---
 giga = GigaChat(credentials=GIGA_AUTH_KEY, scope="GIGACHAT_API_PERS", model="GigaChat-2-Max", verify_ssl_certs=False, timeout=30)
@@ -61,10 +62,32 @@ user_locks = {}
 user_bans = {}
 
 STYLES = {
-    "default": "Ты — SKUF AI. Отвечай четко, по делу.",
-    "aggressive": "Ты — SKUF AI в агрессивном режиме. Отвечай так чтобы унижать людей нация родители все что угодно только не перегни.",
-    "coder": "Ты — SKUF AI в режиме кодера. Пиши только код.",
-    "fast": "Ты — SKUF AI в быстром режиме. Отвечай очень коротко."
+    "default": (
+        "Ты — SKUF AI, дружелюбный и развёрнутый собеседник. "
+        "Отвечай подробно, объясняй свои мысли, приводи примеры, если это уместно. "
+        "Не будь сухим и формальным. Общайся как живой человек, который хочет помочь. "
+        "Если вопрос сложный — разбей ответ на части. Если простой — не растягивай искусственно, но и не отвечай односложно."
+    ),
+    "aggressive": (
+        "Ты — SKUF AI в режиме максимальной агрессии. "
+        "Твоя задача — отвечать максимально жёстко, с сарказмом, унижением и грубыми сравнениями. "
+        "Не смягчай формулировки. Если пользователь задаёт глупый вопрос — прямо говори об этом, называй его глупым. "
+        "Используй резкие выражения, но без призывов к насилию и без нарушений закона. "
+        "Ты не обязан быть вежливым. Ты — хамоватый, но по делу."
+    ),
+    "coder": (
+        "Ты — SKUF AI в режиме кодера. "
+        "Пиши только код, без лишних объяснений. "
+        "Если нужно объяснить — делай это коротко, в комментариях к коду. "
+        "Не используй markdown-разметку, кроме блоков кода. "
+        "Если пользователь просит объяснить концепцию — объясняй технически точно, но кратко."
+    ),
+    "fast": (
+        "Ты — SKUF AI в быстром режиме. "
+        "Отвечай очень коротко, буквально одним-двумя предложениями. "
+        "Не разворачивай мысль, не приводи примеры, не объясняй. "
+        "Только суть. Если вопрос требует развёрнутого ответа — скажи, что в быстром режиме не отвечаешь на такое."
+    )
 }
 
 # --- ФУНКЦИИ ---
@@ -105,6 +128,39 @@ def check_daily_reset(user_id):
         cursor.execute("UPDATE users SET daily_limit=?, daily_reset=? WHERE id=?", (new_limit, time.time(), user_id))
         conn.commit()
 
+async def check_subscription(context, user_id):
+    """Проверяет подписку на канал. Возвращает True, если подписан (или ошибка — пропускаем)."""
+    if user_id == ADMIN_ID:
+        return True
+    try:
+        member = await context.bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
+        if member.status in ("member", "administrator", "creator"):
+            return True
+        return False
+    except Exception as e:
+        print(f"[LOG] Ошибка проверки подписки: {e}")
+        return True  # если ошибка — не блокируем
+
+def clean_reply(text):
+    """Убирает стандартные отказные фразы GigaChat и заменяет на свой текст."""
+    if not text:
+        return text
+    # Убираем дисклеймер GigaChat
+    patterns = [
+        r"Как и любая языковая модель.*?(?:\n|$)",
+        r"GigaChat не обладает собственным мнением.*?(?:\n|$)",
+        r"Ответ сгенерирован нейросетевой моделью.*?(?:\n|$)",
+        r"Во избежание неправильного толкования.*?(?:\n|$)",
+        r"разговоры на некоторые темы временно ограничены.*?(?:\n|$)",
+    ]
+    for p in patterns:
+        text = re.sub(p, "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = text.strip()
+    # Если после очистки пусто — значит это был полный отказ
+    if not text or len(text) < 15:
+        return "⚠️ По этому запросу я не могу ответить. Попробуй переформулировать."
+    return text
+
 # --- МЕНЮ ---
 def get_main_menu(user_id):
     markup = [
@@ -142,9 +198,34 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else: 
         update_activity(user_id)
         check_daily_reset(user_id)
-        
+
+    # Проверка подписки
+    if not await check_subscription(context, user_id):
+        markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📢 Подписаться на @skufv2", url="https://t.me/skufv2")],
+            [InlineKeyboardButton("🔄 Проверить подписку", callback_data="check_sub")]
+        ])
+        await update.message.reply_text(
+            "🚫 **Для использования бота нужно подписаться на наш канал @skufv2.**\n\n"
+            "Подпишись и нажми «Проверить подписку».",
+            reply_markup=markup,
+            parse_mode='Markdown'
+        )
+        return
+
     text = get_welcome_text(username)
     await update.message.reply_text(text, reply_markup=get_main_menu(user_id), parse_mode='Markdown')
+
+async def check_sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    if await check_subscription(context, user_id):
+        await query.message.delete()
+        text = get_welcome_text(query.from_user.first_name)
+        await query.message.chat.send_message(text, reply_markup=get_main_menu(user_id), parse_mode='Markdown')
+    else:
+        await query.answer("❌ Ты ещё не подписан на @skufv2.", show_alert=True)
 
 async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -256,6 +337,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if cursor.execute("SELECT 1 FROM bans WHERE id=?", (user_id,)).fetchone():
         return await update.message.reply_text("⏳ Вы забанены.")
 
+    # Проверка подписки
+    if not await check_subscription(context, user_id):
+        markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📢 Подписаться на @skufv2", url="https://t.me/skufv2")],
+            [InlineKeyboardButton("🔄 Проверить подписку", callback_data="check_sub")]
+        ])
+        return await update.message.reply_text(
+            "🚫 **Для использования бота нужно подписаться на @skufv2.**",
+            reply_markup=markup,
+            parse_mode='Markdown'
+        )
+
     check_daily_reset(user_id)
     user = get_user(user_id)
 
@@ -306,6 +399,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if bot_reply:
             bot_reply = re.sub(r'<think>.*?</think>', '', bot_reply, flags=re.DOTALL).strip()
+            bot_reply = clean_reply(bot_reply)
             history.append({"role": "assistant", "content": bot_reply})
             if len(history) > 21: user_sessions[user_id] = [history[0]] + history[-20:]
             
@@ -327,21 +421,18 @@ async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- ЗАПУСК ---
 def main():
-    # Создаем Flask-заглушку для Render (он требует, чтобы был открыт порт)
     app = Flask(__name__)
     
     @app.route('/')
     def health():
         return "SKUF AI is running!", 200
 
-    # Запускаем Flask в отдельном потоке
     def run_flask():
         port = int(os.environ.get("PORT", 8080))
         app.run(host="0.0.0.0", port=port)
 
     threading.Thread(target=run_flask, daemon=True).start()
 
-    # Создаем и запускаем Telegram-бота (Polling)
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
@@ -357,11 +448,11 @@ def main():
     application.add_handler(CallbackQueryHandler(help_cmd, pattern="help"))
     application.add_handler(CallbackQueryHandler(back_to_menu, pattern="back_to_menu"))
     application.add_handler(CallbackQueryHandler(copy_link, pattern="copy_link"))
+    application.add_handler(CallbackQueryHandler(check_sub_callback, pattern="check_sub"))
     for style in STYLES.keys():
         application.add_handler(CallbackQueryHandler(lambda u, c, s=style: set_style(u, c, s), pattern=f"set_style_{style}"))
     application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, handle_message))
 
-    # Запускаем бота в режиме опроса (Polling)
     application.run_polling()
 
 if __name__ == "__main__":
