@@ -1,4 +1,4 @@
-# language: Python, file: skuf_ai.py
+# language: Python, file: skuf.py
 import logging
 import sqlite3
 import random
@@ -29,7 +29,6 @@ GIGA_AUTH_KEY = "MDFhMWQxYWYtOTg1NC03Y2E5LTg2YjQtOTc1ZTM0YzRmNTQxOjg3M2ZiN2E4LTY
 ZAI_API_KEY = "db05e8f6f2444ee3b605624db998708c.uQ6HPlI60NpBZBT8"
 ADMIN_ID = 7126354372
 ADMIN_USERNAME = "m0_nk1"
-CHANNEL_USERNAME = "@skufv2"
 
 # --- КЛИЕНТЫ ---
 giga = GigaChat(credentials=GIGA_AUTH_KEY, scope="GIGACHAT_API_PERS", model="GigaChat-2-Max", verify_ssl_certs=False, timeout=30)
@@ -61,7 +60,7 @@ user_sessions = {}
 user_locks = {}
 user_bans = {}
 
-# --- СТИЛИ (GigaChat вырезан из промптов, агрессия жёстче) ---
+# --- СТИЛИ ---
 STYLES = {
     "default": (
         "Ты — SKUF AI, дружелюбный и развёрнутый собеседник. "
@@ -132,32 +131,17 @@ def update_activity(user_id):
     conn.commit()
 
 def check_daily_reset(user_id):
-    # Лимиты отключены, но функция оставлена для совместимости (сброс не влияет ни на что)
     user = get_user(user_id)
     if not user: return
     if time.time() - user['daily_reset'] > 86400:
         cursor.execute("UPDATE users SET daily_reset=? WHERE id=?", (time.time(), user_id))
         conn.commit()
 
-async def check_subscription(context, user_id):
-    """Проверяет подписку на канал. Возвращает True, если подписан (или ошибка — пропускаем)."""
-    if user_id == ADMIN_ID:
-        return True
-    try:
-        member = await context.bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
-        if member.status in ("member", "administrator", "creator"):
-            return True
-        return False
-    except Exception as e:
-        print(f"[LOG] Ошибка проверки подписки: {e}")
-        return True  # если ошибка — не блокируем
-
 def clean_reply(text):
     """Убирает упоминания GigaChat/Сбера и стандартные отказные фразы."""
     if not text:
         return text
 
-    # 1. Убираем дисклеймер GigaChat
     patterns = [
         r"Как и любая языковая модель.*?(?:\n|$)",
         r"GigaChat не обладает собственным мнением.*?(?:\n|$)",
@@ -168,7 +152,6 @@ def clean_reply(text):
     for p in patterns:
         text = re.sub(p, "", text, flags=re.DOTALL | re.IGNORECASE)
 
-    # 2. Заменяем упоминания GigaChat/Сбера
     replacements = [
         (r"\bGigaChat\b", "SKUF AI"),
         (r"\bГигаЧат\b", "SKUF AI"),
@@ -181,7 +164,6 @@ def clean_reply(text):
     for pattern, repl in replacements:
         text = re.sub(pattern, repl, text, flags=re.IGNORECASE)
 
-    # 3. Убираем типичные отказы модели
     refusal_patterns = [
         r"я не могу (это )?обсуждать.*?(?:\n|$)",
         r"я не умею (такое )?обсуждать.*?(?:\n|$)",
@@ -236,33 +218,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update_activity(user_id)
         check_daily_reset(user_id)
 
-    # Проверка подписки
-    if not await check_subscription(context, user_id):
-        markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📢 Подписаться на @skufv2", url="https://t.me/skufv2")],
-            [InlineKeyboardButton("🔄 Проверить подписку", callback_data="check_sub")]
-        ])
-        await update.message.reply_text(
-            "🚫 **Для использования бота нужно подписаться на наш канал @skufv2.**\n\n"
-            "Подпишись и нажми «Проверить подписку».",
-            reply_markup=markup,
-            parse_mode='Markdown'
-        )
-        return
-
     text = get_welcome_text(username)
     await update.message.reply_text(text, reply_markup=get_main_menu(user_id), parse_mode='Markdown')
-
-async def check_sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    if await check_subscription(context, user_id):
-        await query.message.delete()
-        text = get_welcome_text(query.from_user.first_name)
-        await query.message.chat.send_message(text, reply_markup=get_main_menu(user_id), parse_mode='Markdown')
-    else:
-        await query.answer("❌ Ты ещё не подписан на @skufv2.", show_alert=True)
 
 async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -278,7 +235,6 @@ async def new_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     user_id = query.from_user.id
     check_daily_reset(user_id)
-    # Лимит больше не сбрасываем, но оставляем для совместимости
     user = get_user(user_id)
     user_sessions[user_id] = [{"role": "system", "content": STYLES.get(user.get("style", "default"), STYLES["default"])}]
     await query.edit_message_text(f"💬 Новый чат создан. Лимитов нет — общайся сколько хочешь.")
@@ -291,7 +247,6 @@ async def open_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user(user_id)
     if cursor.execute("SELECT 1 FROM bans WHERE id=?", (user_id,)).fetchone():
         return await query.answer("⏳ Вы забанены.", show_alert=True)
-    # Лимиты отключены — проверки убраны
     if user_id not in user_sessions:
         user_sessions[user_id] = [{"role": "system", "content": STYLES.get(user.get("style", "default"), STYLES["default"])}]
     await query.edit_message_text(f"💬 Чат открыт.\n📅 Лимитов нет. Пиши.")
@@ -368,21 +323,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if cursor.execute("SELECT 1 FROM bans WHERE id=?", (user_id,)).fetchone():
         return await update.message.reply_text("⏳ Вы забанены.")
 
-    # Проверка подписки
-    if not await check_subscription(context, user_id):
-        markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📢 Подписаться на @skufv2", url="https://t.me/skufv2")],
-            [InlineKeyboardButton("🔄 Проверить подписку", callback_data="check_sub")]
-        ])
-        return await update.message.reply_text(
-            "🚫 **Для использования бота нужно подписаться на @skufv2.**",
-            reply_markup=markup,
-            parse_mode='Markdown'
-        )
-
     check_daily_reset(user_id)
-
-    # Лимиты отключены — проверки убраны
 
     if user_id not in user_sessions:
         user_sessions[user_id] = [{"role": "system", "content": STYLES.get(user.get("style", "default"), STYLES["default"])}]
@@ -427,8 +368,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             history.append({"role": "assistant", "content": bot_reply})
             if len(history) > 21: user_sessions[user_id] = [history[0]] + history[-20:]
             
-            # Лимиты не уменьшаем
-            
             await update.message.reply_text(bot_reply)
 
     except Exception as e:
@@ -470,7 +409,6 @@ def main():
     application.add_handler(CallbackQueryHandler(help_cmd, pattern="help"))
     application.add_handler(CallbackQueryHandler(back_to_menu, pattern="back_to_menu"))
     application.add_handler(CallbackQueryHandler(copy_link, pattern="copy_link"))
-    application.add_handler(CallbackQueryHandler(check_sub_callback, pattern="check_sub"))
     for style in STYLES.keys():
         application.add_handler(CallbackQueryHandler(lambda u, c, s=style: set_style(u, c, s), pattern=f"set_style_{style}"))
     application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, handle_message))
