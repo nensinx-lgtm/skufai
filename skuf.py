@@ -54,12 +54,12 @@ from gigachat.models import Chat, Messages, MessagesRole
 # Configuration
 # -----------------------------------------------------------------------------
 
-TELEGRAM_TOKEN = os.getenv("9246046750:AAEHxks0Fgu4BKO27R_Rdi5wF-LFvxdygUE", "").strip()
-GIGA_AUTH_KEY = os.getenv("MDFhMWQxYWYtOTg1NC03Y2E5LTg2YjQtOTc1ZTM0YzRmNTQxOjg3M2ZiN2E4LTY4MjUtNDNiZC1iZmVmLWMwMzI0ZDBiN2E2Ng==", "").strip()
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "9246046750:AAEHxks0Fgu4BKO27R_Rdi5wF-LFvxdygUE").strip()
+GIGA_AUTH_KEY = os.getenv("GIGA_AUTH_KEY", "\MDFhMWQxYWYtOTg1NC03Y2E5LTg2YjQtOTc1ZTM0YzRmNTQxOjg3M2ZiN2E4LTY4MjUtNDNiZC1iZmVmLWMwMzI0ZDBiN2E2Ng==").strip()
 ZAI_API_KEY = os.getenv("ZAI_API_KEY", "").strip()
 ADMIN_ID = int(os.getenv("ADMIN_ID", "7126354372"))
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "efe8efe8").lstrip("@")
-DATABASE_URL = os.getenv("postgresql://postgres.choxxgmmhefwicwxzkiw:maksimka33..%2F%2F.@aws-1-eu-west-1.pooler.supabase.com:5432/postgres", "").strip()
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres.choxxgmmhefwicwxzkiw:maksimka33..%2F%2F.@aws-1-eu-west-1.pooler.supabase.com:5432/postgres").strip()
 
 GIGA_MODEL = os.getenv("GIGA_MODEL", "GigaChat-2-Max")
 ZAI_MODEL = os.getenv("ZAI_MODEL", "glm-4.5")
