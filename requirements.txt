@@ -1,4 +1,4 @@
-python-telegram-bot==21.1.1
+python-telegram-bot==22.7
 openai
 gigachat
 beautifulsoup4
