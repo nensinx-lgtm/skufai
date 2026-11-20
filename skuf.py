@@ -55,7 +55,7 @@ from gigachat.models import Chat, Messages, MessagesRole
 # -----------------------------------------------------------------------------
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "9246046750:AAEHxks0Fgu4BKO27R_Rdi5wF-LFvxdygUE").strip()
-GIGA_AUTH_KEY = os.getenv("GIGA_AUTH_KEY", "\MDFhMWQxYWYtOTg1NC03Y2E5LTg2YjQtOTc1ZTM0YzRmNTQxOjg3M2ZiN2E4LTY4MjUtNDNiZC1iZmVmLWMwMzI0ZDBiN2E2Ng==").strip()
+GIGA_AUTH_KEY = os.getenv("GIGA_AUTH_KEY", "MDFhMWQxYWYtOTg1NC03Y2E5LTg2YjQtOTc1ZTM0YzRmNTQxOjg3M2ZiN2E4LTY4MjUtNDNiZC1iZmVmLWMwMzI0ZDBiN2E2Ng==").strip()
 ZAI_API_KEY = os.getenv("ZAI_API_KEY", "").strip()
 ADMIN_ID = int(os.getenv("ADMIN_ID", "7126354372"))
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "efe8efe8").lstrip("@")
